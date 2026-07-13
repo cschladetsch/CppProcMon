@@ -226,6 +226,12 @@ int main() {
     std::unordered_map<uint32_t, ProcHistory> history;
     const auto appStart = std::chrono::steady_clock::now();
 
+    // Set by double-clicking a row in list view: pins that process into the
+    // graph (in addition to whatever clears the 75% cumulative bar) so you
+    // can see a specific process "in relation to" the top offenders, even
+    // if it wouldn't normally make the cut on its own.
+    uint32_t focusedPid = 0;
+
     // Right-click "Kill Process" state, shared across frames.
     uint32_t pendingKillPid = 0;
     std::wstring pendingKillName;
@@ -437,10 +443,18 @@ int main() {
 
                     // Invisible selectable spanning the whole row: gives us a
                     // right-click target that covers every column, not just
-                    // whichever cell happens to be under the cursor.
+                    // whichever cell happens to be under the cursor. Also
+                    // doubles as the double-click target that jumps to graph
+                    // view focused on this process.
                     ImGui::TableSetColumnIndex(0);
-                    ImGui::Selectable("##rowhit", false,
-                                       ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap);
+                    if (ImGui::Selectable("##rowhit", false,
+                                           ImGuiSelectableFlags_SpanAllColumns |
+                                               ImGuiSelectableFlags_AllowOverlap |
+                                               ImGuiSelectableFlags_AllowDoubleClick) &&
+                        ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                        graphView = true;
+                        focusedPid = s->pid;
+                    }
 
                     if (ImGui::BeginPopupContextItem("row_context")) {
                         ImGui::TextUnformatted(WideToUtf8(s->name).c_str());
@@ -541,6 +555,24 @@ int main() {
                 cumulative += s->cpuPercent;
             }
 
+            // A double-clicked process from list view stays pinned into the
+            // graph even if it doesn't crack the top-75% cut, so it can be
+            // seen "in relation to" the processes that do.
+            if (focusedPid != 0) {
+                bool alreadyIn = std::any_of(selected.begin(), selected.end(),
+                                              [&](const ProcessSample* s) { return s->pid == focusedPid; });
+                if (!alreadyIn) {
+                    auto it = std::find_if(displaySamples.begin(), displaySamples.end(),
+                                            [&](const ProcessSample& s) { return s.pid == focusedPid; });
+                    if (it != displaySamples.end()) {
+                        selected.push_back(&*it);
+                    } else {
+                        // Process exited or aged out - nothing left to pin.
+                        focusedPid = 0;
+                    }
+                }
+            }
+
             const double nowT = std::chrono::duration<double>(std::chrono::steady_clock::now() - appStart).count();
             const double windowStart = nowT - graphWindowSeconds;
 
@@ -585,7 +617,9 @@ int main() {
                 auto it = history.find(s->pid);
                 if (it == history.end() || it->second.samples.size() < 2) continue;
 
+                bool isFocused = (s->pid == focusedPid);
                 ImU32 color = ColorForPid(s->pid);
+                float lineWidth = isFocused ? 3.5f : 2.0f;
                 ImVec2 prev{};
                 bool havePrev = false;
                 for (const auto& sample : it->second.samples) {
@@ -594,10 +628,15 @@ int main() {
                     float yFrac = std::min(sample.cpuPercent, 100.0f) / 100.0f;
                     ImVec2 p(origin.x + graphSize.x * xFrac, origin.y + graphSize.y * (1.0f - yFrac));
                     if (havePrev) {
-                        drawList->AddLine(prev, p, color, 2.0f);
+                        drawList->AddLine(prev, p, color, lineWidth);
                     }
                     prev = p;
                     havePrev = true;
+                }
+                // Halo the last point of the focused process so it's easy to
+                // spot even when several lines cross near it.
+                if (isFocused && havePrev) {
+                    drawList->AddCircle(prev, 5.0f, color, 0, 2.0f);
                 }
             }
 
@@ -608,13 +647,25 @@ int main() {
             ImGui::SameLine();
             ImGui::BeginChild("graph_legend", ImVec2(0, graphSize.y), true);
             ImGui::TextDisabled("Top procs (cumulative CPU > 75%%)");
+            if (focusedPid != 0) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Clear focus")) {
+                    focusedPid = 0;
+                }
+            }
             ImGui::Separator();
             for (auto* s : selected) {
+                bool isFocused = (s->pid == focusedPid);
                 ImVec4 c = ImGui::ColorConvertU32ToFloat4(ColorForPid(s->pid));
                 ImGui::ColorButton("##swatch", c, ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoBorder,
                                     ImVec2(12, 12));
                 ImGui::SameLine();
-                ImGui::Text("%s  %.1f%%", WideToUtf8(s->name).c_str(), s->cpuPercent);
+                if (isFocused) {
+                    ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s  %.1f%%  (focused)",
+                                        WideToUtf8(s->name).c_str(), s->cpuPercent);
+                } else {
+                    ImGui::Text("%s  %.1f%%", WideToUtf8(s->name).c_str(), s->cpuPercent);
+                }
             }
             if (selected.empty()) {
                 ImGui::TextDisabled("(no processes)");
