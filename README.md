@@ -1,5 +1,12 @@
-# ProcMon
+<p align="center">
+  <img src="assets/logo.png" width="140" alt="CppProcMon logo" />
+</p>
 
+<p align="center">
+  <img src="assets/logo.png" width="140" alt="CppProcMon logo" />
+</p>
+
+# CppProcMon
 A small Dear ImGui desktop app for Windows that shows realtime, per-process
 CPU%, RAM and VRAM usage in a sortable, filterable table — refreshed every
 second by default (adjustable live in the UI).
