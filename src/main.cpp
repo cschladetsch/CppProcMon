@@ -232,7 +232,16 @@ int main() {
     std::string statusMessage;
 
     while (!glfwWindowShouldClose(window)) {
-        glfwPollEvents();
+        // glfwPollEvents() returns immediately, so a plain poll loop redraws
+        // at whatever rate vsync allows (typically 60Hz) forever, even while
+        // completely idle between polls - wasted CPU/GPU for a monitoring
+        // tool that only actually has new data once per intervalSeconds.
+        // glfwWaitEventsTimeout blocks until either a real input event (so
+        // dragging sliders/typing stays fully responsive - each mouse move
+        // or keystroke is its own event that wakes it immediately) or the
+        // timeout elapses, so steady-state redraws drop to roughly once per
+        // update interval instead of once per frame.
+        glfwWaitEventsTimeout(static_cast<double>(std::max(0.05f, intervalUi)));
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();

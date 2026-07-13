@@ -6,9 +6,14 @@
     defines) is authored as Prolog facts in ProcMon.lm and transpiled to
     generated/CMakeLists.txt by CppLogicMake
     (https://github.com/cschladetsch/CppLogiMake). This script regenerates
-    that file automatically if `logimake` is on PATH or $env:LOGICMAKE_ROOT
-    is set; otherwise it builds from the checked-in generated/CMakeLists.txt
-    snapshot as-is.
+    that file automatically when $env:LOGICMAKE_ROOT is set, by calling
+    build\logicmake.exe directly rather than going through that repo's
+    generate.ps1/logimake.ps1 wrappers - those currently mis-forward -Input
+    and fail with "-OutputDir is required when passing multiple -Input
+    files" even for a single file. If only a bare `logimake` is on PATH
+    (no $env:LOGICMAKE_ROOT), it's used as a fallback and may hit that same
+    bug. If neither is available, it builds from the checked-in
+    generated/CMakeLists.txt snapshot as-is.
 
 .PARAMETER Configuration
     Build configuration: Debug, Release (default), or RelWithDebInfo.
@@ -54,6 +59,27 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Tall banner announcing the build is driven by CppLogicMake (ProcMon.lm ->
+# generated/CMakeLists.txt). Plain ASCII on purpose - box-drawing/Unicode
+# glyphs here have previously come out mangled on Windows PowerShell 5.1
+# when the .ps1 file's encoding doesn't round-trip cleanly, so this sticks
+# to characters that can't get corrupted regardless of encoding.
+$banner = @(
+    ' _     _____ _____ ________  ___  ___   _   __ _____ ',
+    '| |   |  _  |  __ \_   _|  \/  | / _ \ | | / /|  ___|',
+    '| |   | | | | |  \/ | | | .  . |/ /_\ \| |/ / | |__  ',
+    '| |   | | | | | __  | | | |\/| ||  _  ||    \ |  __| ',
+    '| |___\ \_/ / |_\ \_| |_| |  | || | | || |\  \| |___ ',
+    '\_____/\___/ \____/\___/\_|  |_/\_| |_/\_| \_/\____/ '
+)
+$bannerColors = @("Red", "Yellow", "Green", "Cyan", "Blue", "Magenta")
+for ($i = 0; $i -lt $banner.Count; ++$i) {
+    Write-Host $banner[$i] -ForegroundColor $bannerColors[$i % $bannerColors.Count]
+}
+Write-Host "        >> ProcMon, built with CppLogicMake <<" -ForegroundColor Gray
+Write-Host "           https://github.com/cschladetsch/CppLogiMake" -ForegroundColor DarkGray
+Write-Host ""
+
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
@@ -74,31 +100,59 @@ if (-not (Get-Command $Compiler -ErrorAction SilentlyContinue)) {
 
 # --- Regenerate generated/CMakeLists.txt from ProcMon.lm via CppLogicMake ---
 if (-not $NoRegenerate) {
-    $logimakeCmd = Get-Command logimake -ErrorAction SilentlyContinue
     $lmFile = Join-Path $root "ProcMon.lm"
     $genFile = Join-Path $root "generated\CMakeLists.txt"
+    $attempted = $false
+    $regenerated = $false
 
-    if ($logimakeCmd) {
-        Write-Host "Regenerating generated/CMakeLists.txt from ProcMon.lm (logimake on PATH)..." -ForegroundColor Cyan
-        & logimake generate -Input $lmFile -Output $genFile -WorkingDirectory $root
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "CppLogicMake generation failed; continuing with the existing generated/CMakeLists.txt."
-        }
-    } elseif ($env:LOGICMAKE_ROOT) {
-        Write-Host "Regenerating generated/CMakeLists.txt from ProcMon.lm (via `$env:LOGICMAKE_ROOT)..." -ForegroundColor Cyan
-        & "$env:LOGICMAKE_ROOT/scripts/generate.ps1" -Input $lmFile -Output $genFile -WorkingDirectory $root
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "CppLogicMake generation failed; continuing with the existing generated/CMakeLists.txt."
+    if ($env:LOGICMAKE_ROOT) {
+        # Call the driver binary directly instead of generate.ps1/logimake.ps1:
+        # those wrapper scripts currently mis-forward -Input and throw
+        # "-OutputDir is required when passing multiple -Input files" even
+        # for a single input file. The driver itself works fine standalone.
+        $driverCandidates = @(
+            (Join-Path $env:LOGICMAKE_ROOT "build\logicmake.exe"),
+            (Join-Path $env:LOGICMAKE_ROOT "build\Release\logicmake.exe")
+        )
+        $driver = $driverCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+        $schema = Join-Path $env:LOGICMAKE_ROOT "prolog\targets.pl"
+
+        if ($driver -and (Test-Path $schema)) {
+            $attempted = $true
+            Write-Host "Regenerating generated/CMakeLists.txt from ProcMon.lm (logicmake.exe via `$env:LOGICMAKE_ROOT)..." -ForegroundColor Cyan
+            Push-Location $root
+            try {
+                & $driver --schema $schema --input $lmFile --output $genFile
+                if ($LASTEXITCODE -eq 0) {
+                    $regenerated = $true
+                } else {
+                    Write-Warning "CppLogicMake generation failed; continuing with the existing generated/CMakeLists.txt."
+                }
+            } finally {
+                Pop-Location
+            }
+        } else {
+            Write-Warning "`$env:LOGICMAKE_ROOT is set but build\logicmake.exe / prolog\targets.pl weren't found under it - run its scripts\build.ps1 first. Continuing with the existing generated/CMakeLists.txt."
         }
     } else {
-        Write-Host "CppLogicMake not found (no 'logimake' on PATH, `$env:LOGICMAKE_ROOT unset) - building from the checked-in generated/CMakeLists.txt." -ForegroundColor Yellow
-        Write-Host "  Install it from: https://github.com/cschladetsch/CppLogiMake" -ForegroundColor Yellow
+        $logimakeCmd = Get-Command logimake -ErrorAction SilentlyContinue
+        if ($logimakeCmd) {
+            $attempted = $true
+            Write-Host "Regenerating generated/CMakeLists.txt from ProcMon.lm (logimake on PATH)..." -ForegroundColor Cyan
+            & logimake generate -Input $lmFile -Output $genFile -WorkingDirectory $root
+            if ($LASTEXITCODE -eq 0) {
+                $regenerated = $true
+            } else {
+                Write-Warning "CppLogicMake generation failed (known bug in the logimake wrapper's argument forwarding - set `$env:LOGICMAKE_ROOT to call the driver directly instead); continuing with the existing generated/CMakeLists.txt."
+            }
+        } else {
+            Write-Host "CppLogicMake not found (no 'logimake' on PATH, `$env:LOGICMAKE_ROOT unset) - building from the checked-in generated/CMakeLists.txt." -ForegroundColor Yellow
+            Write-Host "  Install it from: https://github.com/cschladetsch/CppLogiMake" -ForegroundColor Yellow
+        }
     }
 
-    if ($logimakeCmd -or $env:LOGICMAKE_ROOT) {
-        if (-not (Test-Path (Join-Path $root ".git"))) {
-            Write-Warning "This isn't a git checkout - CppLogicMake resolves ProcMon.lm's source globs via 'git ls-files', so regeneration likely produced an empty/failed target list. Run 'git init; git add -A' first, or pass -NoRegenerate to build from the checked-in generated/CMakeLists.txt."
-        }
+    if ($attempted -and -not $regenerated -and -not (Test-Path (Join-Path $root ".git"))) {
+        Write-Warning "This also isn't a git checkout - CppLogicMake resolves ProcMon.lm's source globs via 'git ls-files', which would fail regardless. Run 'git init; git add -A' first, or pass -NoRegenerate to build from the checked-in generated/CMakeLists.txt."
     }
 }
 
