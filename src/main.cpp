@@ -18,9 +18,11 @@
 #include <cstdio>
 #include <cwchar>
 #include <cwctype>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -146,6 +148,35 @@ bool KillProcessById(uint32_t pid, DWORD& outError) {
 
 enum class SortColumn { Pid, Name, Cpu, Ram, Private, VramDedicated, VramShared, Gpu };
 
+// ---------------------------------------------------------------------------
+// CPU-over-time graph view.
+// ---------------------------------------------------------------------------
+
+// Longest time window the "Time window" slider allows (300s = 5 min). History
+// older than this is pruned every frame regardless of the slider's current
+// setting, so widening the slider never has to wait for data to accumulate.
+constexpr double kMaxHistorySeconds = 300.0;
+
+struct HistorySample {
+    double t = 0.0;       // seconds since app start
+    float cpuPercent = 0.0f;
+};
+
+struct ProcHistory {
+    std::wstring name;
+    std::deque<HistorySample> samples;
+};
+
+// Stable, visually-distinct color per PID: hash the PID into a hue so a
+// given process keeps the same color across frames (and, usually, across
+// runs) without needing a palette that can run out of entries.
+ImU32 ColorForPid(uint32_t pid) {
+    uint32_t h = pid * 2654435761u; // Knuth multiplicative hash
+    float hue = static_cast<float>(h % 360u) / 360.0f;
+    ImVec4 c = static_cast<ImVec4>(ImColor::HSV(hue, 0.65f, 0.95f));
+    return ImGui::ColorConvertFloat4ToU32(c);
+}
+
 } // namespace
 
 int main() {
@@ -186,6 +217,15 @@ int main() {
 
     std::vector<ProcessSample> displaySamples;
 
+    // CPU-over-time graph view: on by default per-process, replacing the
+    // table with a line graph (X = time, Y = CPU%) for whichever processes
+    // are, together, responsible for the top 75% of currently-tracked CPU
+    // usage — the "Time window" slider controls how much history is shown.
+    bool graphView = true;
+    float graphWindowSeconds = 60.0f;
+    std::unordered_map<uint32_t, ProcHistory> history;
+    const auto appStart = std::chrono::steady_clock::now();
+
     // Right-click "Kill Process" state, shared across frames.
     uint32_t pendingKillPid = 0;
     std::wstring pendingKillName;
@@ -207,6 +247,32 @@ int main() {
             memInfo = state.memInfo;
             adapters = state.gpuAdapters;
             pollMs = state.lastPollDurationMs;
+        }
+
+        // Append this frame's samples to per-PID history and prune anything
+        // older than the longest window the slider allows. Done every frame
+        // regardless of graphView so the graph has a full window of data
+        // the moment it's toggled on, instead of building up from empty.
+        {
+            const double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - appStart).count();
+            for (const auto& s : displaySamples) {
+                ProcHistory& h = history[s.pid];
+                h.name = s.name;
+                h.samples.push_back(HistorySample{now, static_cast<float>(s.cpuPercent)});
+                while (!h.samples.empty() && h.samples.front().t < now - kMaxHistorySeconds) {
+                    h.samples.pop_front();
+                }
+            }
+            // Drop history for processes that are gone AND have aged fully
+            // out of the max window, so churny process lists don't leak
+            // memory forever.
+            for (auto it = history.begin(); it != history.end();) {
+                if (!it->second.samples.empty() && it->second.samples.back().t < now - kMaxHistorySeconds) {
+                    it = history.erase(it);
+                } else {
+                    ++it;
+                }
+            }
         }
 
         ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -251,8 +317,17 @@ int main() {
             g_intervalSeconds.store(intervalUi, std::memory_order_relaxed);
         }
 
+        ImGui::Checkbox("Graph view", &graphView);
+        if (graphView) {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(220);
+            ImGui::SliderFloat("Time window (s)", &graphWindowSeconds, 5.0f, static_cast<float>(kMaxHistorySeconds),
+                                "%.0f");
+        }
+
         ImGui::Separator();
 
+        if (!graphView) {
         ImGuiTableFlags tableFlags = ImGuiTableFlags_Resizable | ImGuiTableFlags_Reorderable |
                                       ImGuiTableFlags_Sortable | ImGuiTableFlags_RowBg |
                                       ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersV |
@@ -423,6 +498,119 @@ int main() {
             }
 
             ImGui::EndTable();
+        }
+        } else {
+            // Graph view: X = time (last graphWindowSeconds), Y = CPU%.
+            // Only the processes that, sorted by current CPU% descending,
+            // are needed to push the cumulative total over 75% get drawn -
+            // this keeps the graph readable by dropping the long tail of
+            // near-idle processes. Same name filter as the table applies.
+            std::wstring filterW = Utf8ToWide(filterBuf);
+            for (auto& c : filterW) c = static_cast<wchar_t>(towlower(c));
+
+            std::vector<const ProcessSample*> candidates;
+            candidates.reserve(displaySamples.size());
+            for (auto& s : displaySamples) {
+                if (!filterW.empty()) {
+                    std::wstring nameLower = s.name;
+                    for (auto& c : nameLower) c = static_cast<wchar_t>(towlower(c));
+                    if (nameLower.find(filterW) == std::wstring::npos) continue;
+                }
+                candidates.push_back(&s);
+            }
+            std::sort(candidates.begin(), candidates.end(),
+                      [](const ProcessSample* a, const ProcessSample* b) { return a->cpuPercent > b->cpuPercent; });
+
+            double totalForSelection = 0.0;
+            for (auto* s : candidates) totalForSelection += s->cpuPercent;
+
+            std::vector<const ProcessSample*> selected;
+            double cumulative = 0.0;
+            for (auto* s : candidates) {
+                if (!selected.empty() && cumulative >= totalForSelection * 0.75) break;
+                selected.push_back(s);
+                cumulative += s->cpuPercent;
+            }
+
+            const double nowT = std::chrono::duration<double>(std::chrono::steady_clock::now() - appStart).count();
+            const double windowStart = nowT - graphWindowSeconds;
+
+            ImVec2 avail = ImGui::GetContentRegionAvail();
+            ImVec2 graphSize(avail.x - 220.0f, avail.y - 8.0f);
+            if (graphSize.x < 100.0f) graphSize.x = 100.0f;
+            if (graphSize.y < 100.0f) graphSize.y = 100.0f;
+
+            ImVec2 origin = ImGui::GetCursorScreenPos();
+            ImDrawList* drawList = ImGui::GetWindowDrawList();
+
+            const ImU32 axisColor = IM_COL32(120, 120, 130, 255);
+            const ImU32 gridColor = IM_COL32(60, 60, 68, 255);
+            const ImU32 textColor = IM_COL32(200, 200, 205, 255);
+
+            drawList->AddRectFilled(origin, ImVec2(origin.x + graphSize.x, origin.y + graphSize.y),
+                                     IM_COL32(18, 18, 22, 255));
+            drawList->AddRect(origin, ImVec2(origin.x + graphSize.x, origin.y + graphSize.y), axisColor);
+
+            // Horizontal gridlines + Y axis (usage %) labels.
+            for (int p = 0; p <= 100; p += 25) {
+                float y = origin.y + graphSize.y * (1.0f - static_cast<float>(p) / 100.0f);
+                drawList->AddLine(ImVec2(origin.x, y), ImVec2(origin.x + graphSize.x, y), gridColor);
+                char label[8];
+                snprintf(label, sizeof(label), "%d%%", p);
+                drawList->AddText(ImVec2(origin.x + 4.0f, y - 14.0f), textColor, label);
+            }
+
+            // Vertical gridlines + X axis (time, "-Ns" = N seconds ago).
+            const int timeTicks = 6;
+            for (int i = 0; i <= timeTicks; ++i) {
+                float frac = static_cast<float>(i) / timeTicks;
+                float x = origin.x + graphSize.x * frac;
+                drawList->AddLine(ImVec2(x, origin.y), ImVec2(x, origin.y + graphSize.y), gridColor);
+                double secondsAgo = graphWindowSeconds * (1.0 - frac);
+                char label[16];
+                snprintf(label, sizeof(label), "-%.0fs", secondsAgo);
+                drawList->AddText(ImVec2(x + 2.0f, origin.y + graphSize.y - 16.0f), textColor, label);
+            }
+
+            for (auto* s : selected) {
+                auto it = history.find(s->pid);
+                if (it == history.end() || it->second.samples.size() < 2) continue;
+
+                ImU32 color = ColorForPid(s->pid);
+                ImVec2 prev{};
+                bool havePrev = false;
+                for (const auto& sample : it->second.samples) {
+                    if (sample.t < windowStart) continue;
+                    float xFrac = static_cast<float>((sample.t - windowStart) / graphWindowSeconds);
+                    float yFrac = std::min(sample.cpuPercent, 100.0f) / 100.0f;
+                    ImVec2 p(origin.x + graphSize.x * xFrac, origin.y + graphSize.y * (1.0f - yFrac));
+                    if (havePrev) {
+                        drawList->AddLine(prev, p, color, 2.0f);
+                    }
+                    prev = p;
+                    havePrev = true;
+                }
+            }
+
+            ImGui::Dummy(graphSize);
+
+            // Legend: colored swatch + name + current CPU% for each process
+            // actually being graphed.
+            ImGui::SameLine();
+            ImGui::BeginChild("graph_legend", ImVec2(0, graphSize.y), true);
+            ImGui::TextDisabled("Top procs (cumulative CPU > 75%%)");
+            ImGui::Separator();
+            for (auto* s : selected) {
+                ImVec4 c = ImGui::ColorConvertU32ToFloat4(ColorForPid(s->pid));
+                ImGui::ColorButton("##swatch", c, ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoBorder,
+                                    ImVec2(12, 12));
+                ImGui::SameLine();
+                ImGui::Text("%s  %.1f%%", WideToUtf8(s->name).c_str(), s->cpuPercent);
+            }
+            if (selected.empty()) {
+                ImGui::TextDisabled("(no processes)");
+            }
+            ImGui::EndChild();
         }
 
         // Confirmation modal for "Kill Process", opened from the row context
