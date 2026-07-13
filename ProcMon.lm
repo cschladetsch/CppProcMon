@@ -1,0 +1,39 @@
+% =====================================================================
+% ProcMon build description for CppLogicMake
+% (https://github.com/cschladetsch/CppLogiMake).
+%
+% This file asserts facts only, resolved against CppLogicMake's own
+% prolog/targets.pl schema (see that repo's README for the predicate
+% reference). Regenerate generated/CMakeLists.txt with:
+%   logimake generate -Input ProcMon.lm -Output generated/CMakeLists.txt -WorkingDirectory .
+% (s.ps1 does this automatically when `logimake` is on PATH or
+% $env:LOGICMAKE_ROOT is set.)
+%
+% Source resolution is git-backed (git ls-files), so this repo must be a
+% git checkout with src/*.cpp tracked before regenerating - a fresh
+% `git init && git add -A` is enough, no commit required.
+%
+% Third-party fetching (GLFW, Dear ImGui via CMake's FetchContent) is not
+% expressible in this schema yet - no FetchContent/find_package interop
+% is an explicit non-goal of the tool for now - so that part of the build
+% stays hand-written in cmake/ThirdParty.cmake instead. `imgui` below is
+% referenced as an already-existing CMake target name (defined by that
+% file), not declared as a target/2 fact here.
+% =====================================================================
+
+platform(windows).
+
+target(procmon, exe).
+sources(procmon, "src/*.cpp").
+include(procmon, "src/").
+
+depends(procmon, imgui).
+
+link(procmon, pdh)   :- platform(windows).
+link(procmon, psapi) :- platform(windows).
+link(procmon, dxgi)  :- platform(windows).
+
+define(procmon, 'UNICODE').
+define(procmon, '_UNICODE').
+define(procmon, 'NOMINMAX').
+define(procmon, 'WIN32_LEAN_AND_MEAN').
