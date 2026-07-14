@@ -19,6 +19,10 @@
 % stays hand-written in cmake/ThirdParty.cmake instead. `imgui` below is
 % referenced as an already-existing CMake target name (defined by that
 % file), not declared as a target/2 fact here.
+%
+% compile_options/3 and install/2 (below) used to be hand-written in the
+% root CMakeLists.txt, layered on after add_subdirectory(generated)
+% because the schema had no predicate for either. Both now do.
 % =====================================================================
 
 platform(windows).
@@ -37,3 +41,8 @@ define(procmon, 'UNICODE').
 define(procmon, '_UNICODE').
 define(procmon, 'NOMINMAX').
 define(procmon, 'WIN32_LEAN_AND_MEAN').
+
+compile_options(procmon, 'Clang', "-Wall -Wextra -Wpedantic").
+compile_options(procmon, 'MSVC', "/W4 /utf-8").
+
+install(procmon, bin).

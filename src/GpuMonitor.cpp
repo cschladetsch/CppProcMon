@@ -56,6 +56,32 @@ bool GpuMonitor::ExtractInstance(const std::wstring& fullPath, std::wstring& ins
     return true;
 }
 
+void GpuMonitor::AddEngineUtilization(const std::wstring& instance, double percent, GpuEngineBreakdown& out) {
+    static const wchar_t* kMarker = L"engtype_";
+    auto pos = instance.find(kMarker);
+    std::wstring type = (pos == std::wstring::npos) ? L"" : instance.substr(pos + wcslen(kMarker));
+
+    // Known engine type strings as reported by the "GPU Engine" PDH object;
+    // anything else (Overlay, SceneAssembly, Security, vendor-specific
+    // types, ...) is folded into engineOther so the fields still sum to
+    // the process's total gpuPercent.
+    if (type == L"3D") {
+        out.engine3D += percent;
+    } else if (type == L"Copy") {
+        out.engineCopy += percent;
+    } else if (type == L"VideoDecode") {
+        out.engineVideoDecode += percent;
+    } else if (type == L"VideoEncode") {
+        out.engineVideoEncode += percent;
+    } else if (type == L"VideoProcessing") {
+        out.engineVideoProcessing += percent;
+    } else if (type == L"Compute" || type == L"Cuda") {
+        out.engineCompute += percent;
+    } else {
+        out.engineOther += percent;
+    }
+}
+
 bool GpuMonitor::ExtractPid(const std::wstring& instance, uint32_t& pid) {
     // Instance names look like:
     //   pid_1234_luid_0x00000000_0x0000ABCD_phys_0
@@ -146,6 +172,7 @@ std::unordered_map<uint32_t, GpuMonitor::Stats> GpuMonitor::Poll() {
         uint32_t pid = 0;
         if (ExtractInstance(path, instance) && ExtractPid(instance, pid)) {
             result[pid].utilizationPercent += value.doubleValue;
+            AddEngineUtilization(instance, value.doubleValue, result[pid].engines);
         }
     }
 

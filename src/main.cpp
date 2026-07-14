@@ -101,6 +101,7 @@ void WorkerThread(SharedState* state) {
                 s.gpuDedicatedBytes = it->second.dedicatedBytes;
                 s.gpuSharedBytes = it->second.sharedBytes;
                 s.gpuPercent = it->second.utilizationPercent;
+                s.gpuEngines = it->second.engines;
             }
         }
 
@@ -473,6 +474,26 @@ int main() {
                         ImGui::Text("VRAM (dedicated):  %s", FormatBytes(s->gpuDedicatedBytes).c_str());
                         ImGui::Text("VRAM (shared):     %s", FormatBytes(s->gpuSharedBytes).c_str());
                         ImGui::Text("GPU:              %.1f%%", s->gpuPercent);
+                        // Break the total down by engine (3D, Copy, video
+                        // decode/encode, compute, ...) - Task Manager only
+                        // shows which single engine is busiest, not every
+                        // engine's share at once. Only non-zero engines are
+                        // listed, indented under the total.
+                        const GpuEngineBreakdown& e = s->gpuEngines;
+                        struct EngineRow { const char* label; double percent; };
+                        const EngineRow engineRows[] = {
+                            {"3D", e.engine3D},
+                            {"Copy", e.engineCopy},
+                            {"Video Decode", e.engineVideoDecode},
+                            {"Video Encode", e.engineVideoEncode},
+                            {"Video Processing", e.engineVideoProcessing},
+                            {"Compute", e.engineCompute},
+                            {"Other", e.engineOther},
+                        };
+                        for (const auto& row : engineRows) {
+                            if (row.percent < 0.05) continue;
+                            ImGui::TextDisabled("  %-17s %.1f%%", row.label, row.percent);
+                        }
                         ImGui::Separator();
                         if (ImGui::MenuItem("Copy PID")) {
                             ImGui::SetClipboardText(std::to_string(s->pid).c_str());

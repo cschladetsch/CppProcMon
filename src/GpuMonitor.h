@@ -8,6 +8,8 @@
 #include <windows.h>
 #include <pdh.h>
 
+#include "Types.h"
+
 // Reads per-process VRAM usage and GPU engine utilization via the
 // "GPU Process Memory" and "GPU Engine" PDH performance counter objects
 // (the same source Task Manager's per-process GPU columns use on
@@ -18,7 +20,8 @@ public:
     struct Stats {
         uint64_t dedicatedBytes = 0;
         uint64_t sharedBytes = 0;
-        double utilizationPercent = 0.0;
+        double utilizationPercent = 0.0; // Sum of engines, i.e. Task Manager's GPU%.
+        GpuEngineBreakdown engines;      // Same total, split by engine type.
     };
 
     GpuMonitor();
@@ -43,4 +46,10 @@ private:
 
     static bool ExtractInstance(const std::wstring& fullPath, std::wstring& instance);
     static bool ExtractPid(const std::wstring& instance, uint32_t& pid);
+
+    // Parses the "engtype_<Type>" suffix off a GPU Engine instance name
+    // (e.g. "...eng_0_engtype_VideoDecode" -> "VideoDecode") and adds
+    // `percent` into the matching GpuEngineBreakdown field, falling back to
+    // engineOther for types not broken out individually.
+    static void AddEngineUtilization(const std::wstring& instance, double percent, GpuEngineBreakdown& out);
 };
